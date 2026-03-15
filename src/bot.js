@@ -1,6 +1,7 @@
 import pmxt from 'pmxtjs';
 import { matchOutcomes } from './matcher.js';
 import { findArbitrageOpportunities, getBestOpportunity } from './arbitrage.js';
+import { initLogger, logMatching, logTrade, logError } from './logger.js';
 
 export class ArbitrageBot {
     constructor(config) {
@@ -8,6 +9,7 @@ export class ArbitrageBot {
         this.polymarket = new pmxt.polymarket({ privateKey: config.polymarketPrivateKey });
         this.kalshi = new pmxt.kalshi({ apiKey: config.kalshiApiKey, apiSecret: config.kalshiApiSecret });
         this.currentPosition = null;
+        initLogger(config);
     }
 
     extractMarketId(url, platform) {
@@ -42,7 +44,11 @@ export class ArbitrageBot {
                 const noOutcome = market.outcomes.find(o => o.label.toLowerCase().includes('no') || o.side === 'no');
 
                 // Fallback: if not found by label, use the first/second outcome
-                const title = yesOutcome ? yesOutcome.label : market.outcomes[0].label;
+                const title = market.title || market.question || market.name || market.groupItemTitle
+                    || (yesOutcome ? yesOutcome.label : market.outcomes[0].label);
+                if (/^(yes|no)$/i.test(title)) {
+                    console.warn(`[WARN] Market ${market.id} resolved to generic title "${title}" — matching may be unreliable. Inspect market object fields.`);
+                }
                 const yesId = yesOutcome ? yesOutcome.id : market.outcomes[0].id;
                 const noId = noOutcome ? noOutcome.id : market.outcomes[1].id;
 
@@ -133,9 +139,35 @@ export class ArbitrageBot {
                 entryTime: Date.now()
             };
 
+            logTrade({
+                event: 'ENTRY',
+                outcome: opportunity.outcome,
+                strategy: opportunity.type,
+                polymarketSide: opportunity.polymarketSide,
+                kalshiSide: opportunity.kalshiSide,
+                polyPrice,
+                kalshiPrice,
+                polyContracts,
+                kalshiContracts,
+                profit: opportunity.profit,
+            });
+
             return true;
         }
         console.log('[ERROR] Trade execution failed\n');
+        logTrade({
+            event: 'ENTRY_FAILED',
+            outcome: opportunity.outcome,
+            strategy: opportunity.type,
+            polymarketSide: opportunity.polymarketSide,
+            kalshiSide: opportunity.kalshiSide,
+            polyPrice,
+            kalshiPrice,
+            polyContracts,
+            kalshiContracts,
+            profit: opportunity.profit,
+            error: `Poly: ${polyTrade.success ? 'OK' : polyTrade.error}, Kalshi: ${kalshiTrade.success ? 'OK' : kalshiTrade.error}`,
+        });
         return false;
     }
 
@@ -195,11 +227,26 @@ export class ArbitrageBot {
             this.executeTrade('kalshi', opportunity.kalshiOutcome.marketId, outcomeIds.kalshi, 'sell', shares.kalshi)
         ]);
 
+        const exitTradeData = {
+            event: polyExit.success && kalshiExit.success ? 'EXIT' : 'EXIT_FAILED',
+            outcome: opportunity.outcome,
+            strategy: opportunity.type,
+            polymarketSide: opportunity.polymarketSide,
+            kalshiSide: opportunity.kalshiSide,
+            polyPrice: this.currentPosition.entryPrices.polymarket,
+            kalshiPrice: this.currentPosition.entryPrices.kalshi,
+            polyContracts: shares.polymarket,
+            kalshiContracts: shares.kalshi,
+            profit: opportunity.profit,
+        };
+
         if (polyExit.success && kalshiExit.success) {
             console.log(`[SOLD] Position closed successfully.\n`);
+            logTrade(exitTradeData);
             this.currentPosition = null;
         } else {
             console.log(`[ERROR] Failed to close position fully. Check logs.\n`);
+            logTrade({ ...exitTradeData, error: `Poly: ${polyExit.success ? 'OK' : polyExit.error}, Kalshi: ${kalshiExit.success ? 'OK' : kalshiExit.error}` });
             // Force clear for now, but in production we'd need manual intervention
             this.currentPosition = null;
         }
@@ -211,6 +258,28 @@ export class ArbitrageBot {
             const polymarketOutcomes = this.parseOutcomes(polymarketMarkets, 'polymarket');
             const kalshiOutcomes = this.parseOutcomes(kalshiMarkets, 'kalshi');
             const matches = matchOutcomes(polymarketOutcomes, kalshiOutcomes, this.config.matchingThreshold);
+
+            // Log matching results
+            const matchedPolyIds = new Set(matches.map(m => m.polymarket.marketId));
+            const matchedKalshiIds = new Set(matches.map(m => m.kalshi.marketId));
+            const unmatchedPoly = polymarketOutcomes.filter(o => !matchedPolyIds.has(o.marketId));
+            const unmatchedKalshi = kalshiOutcomes.filter(o => !matchedKalshiIds.has(o.marketId));
+
+            console.log(`[MATCHING] Polymarket: ${polymarketOutcomes.length} outcomes | Kalshi: ${kalshiOutcomes.length} outcomes | Matched: ${matches.length} pairs`);
+            matches.forEach(m => {
+                console.log(`  "${m.polymarket.title}" <=> "${m.kalshi.title}" (score: ${m.similarity.toFixed(3)})`);
+            });
+            if (unmatchedPoly.length > 0) console.log(`[UNMATCHED] Polymarket (${unmatchedPoly.length}): ${unmatchedPoly.map(o => o.title).join(', ')}`);
+            if (unmatchedKalshi.length > 0) console.log(`[UNMATCHED] Kalshi (${unmatchedKalshi.length}): ${unmatchedKalshi.map(o => o.title).join(', ')}`);
+
+            logMatching({
+                polymarketCount: polymarketOutcomes.length,
+                kalshiCount: kalshiOutcomes.length,
+                matches,
+                unmatchedPoly,
+                unmatchedKalshi,
+            });
+
             const allOpportunities = findArbitrageOpportunities(matches, this.config.minProfitCents)
                 .filter(opp => {
                     // Skip markets where either side has a price at or below the threshold
@@ -254,6 +323,7 @@ export class ArbitrageBot {
         } catch (error) {
             console.error('[ERROR]', error.message);
             console.error(error.stack);
+            logError(error.message, error.stack);
         }
     }
 

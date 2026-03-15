@@ -8,6 +8,14 @@ jest.unstable_mockModule('pmxtjs', () => ({
     }
 }));
 
+// Mock logger to avoid file I/O in tests
+jest.unstable_mockModule('../src/logger.js', () => ({
+    initLogger: jest.fn(),
+    logMatching: jest.fn(),
+    logTrade: jest.fn(),
+    logError: jest.fn(),
+}));
+
 describe('ArbitrageBot', () => {
     let ArbitrageBot;
     let bot;
@@ -173,6 +181,149 @@ describe('ArbitrageBot', () => {
 
             // Verify Position Cleared
             expect(bot.currentPosition).toBeNull();
+        });
+    });
+
+    describe('parseOutcomes', () => {
+        test('should use market.title for matching, not outcome label', () => {
+            const markets = [
+                {
+                    id: 'warsh_mkt', title: 'Kevin Warsh', volume: 50000,
+                    outcomes: [
+                        { label: 'Yes', price: 0.41, id: 'w_y', side: 'yes' },
+                        { label: 'No', price: 0.59, id: 'w_n', side: 'no' }
+                    ]
+                },
+                {
+                    id: 'powell_mkt', title: 'Jerome Powell', volume: 30000,
+                    outcomes: [
+                        { label: 'Yes', price: 0.25, id: 'p_y', side: 'yes' },
+                        { label: 'No', price: 0.75, id: 'p_n', side: 'no' }
+                    ]
+                }
+            ];
+
+            const parsed = bot.parseOutcomes(markets, 'polymarket');
+
+            expect(parsed[0].title).toBe('Kevin Warsh');
+            expect(parsed[1].title).toBe('Jerome Powell');
+            // Must NOT be 'Yes'
+            expect(parsed[0].title).not.toBe('Yes');
+            expect(parsed[1].title).not.toBe('Yes');
+        });
+
+        test('should fall back to market.question if title is missing', () => {
+            const markets = [{
+                id: 'q_mkt', question: 'Will Bitcoin exceed $100k?', volume: 1000,
+                outcomes: [
+                    { label: 'Yes', price: 0.60, id: 'q_y', side: 'yes' },
+                    { label: 'No', price: 0.40, id: 'q_n', side: 'no' }
+                ]
+            }];
+
+            const parsed = bot.parseOutcomes(markets, 'polymarket');
+            expect(parsed[0].title).toBe('Will Bitcoin exceed $100k?');
+        });
+
+        test('should fall back to outcome label when no market-level title exists', () => {
+            const markets = [{
+                id: 'bare_mkt', volume: 500,
+                outcomes: [
+                    { label: 'Yes', price: 0.50, id: 'b_y', side: 'yes' },
+                    { label: 'No', price: 0.50, id: 'b_n', side: 'no' }
+                ]
+            }];
+
+            const parsed = bot.parseOutcomes(markets, 'polymarket');
+            // Falls back to outcome label as last resort
+            expect(parsed[0].title).toBe('Yes');
+        });
+
+        test('should correctly parse prices and IDs alongside title', () => {
+            const markets = [{
+                id: 'mkt1', title: 'Kevin Hassett', volume: 10000,
+                outcomes: [
+                    { label: 'Yes', price: 0.10, id: 'h_y', side: 'yes' },
+                    { label: 'No', price: 0.90, id: 'h_n', side: 'no' }
+                ]
+            }];
+
+            const parsed = bot.parseOutcomes(markets, 'kalshi');
+            expect(parsed[0]).toEqual({
+                title: 'Kevin Hassett',
+                marketId: 'mkt1',
+                yesId: 'h_y',
+                noId: 'h_n',
+                yesPrice: 10,
+                noPrice: 90,
+                platform: 'kalshi',
+                volume: 10000,
+            });
+        });
+
+        test('end-to-end: parseOutcomes + matchOutcomes pairs candidates correctly across platforms', async () => {
+            const { matchOutcomes } = await import('../src/matcher.js');
+
+            const polyMarkets = [
+                { id: 'p_warsh', title: 'Kevin Warsh', volume: 50000, outcomes: [{ label: 'Yes', price: 0.41, id: 'pw_y', side: 'yes' }, { label: 'No', price: 0.59, id: 'pw_n', side: 'no' }] },
+                { id: 'p_powell', title: 'Jerome Powell', volume: 30000, outcomes: [{ label: 'Yes', price: 0.25, id: 'pp_y', side: 'yes' }, { label: 'No', price: 0.75, id: 'pp_n', side: 'no' }] },
+                { id: 'p_hassett', title: 'Kevin Hassett', volume: 10000, outcomes: [{ label: 'Yes', price: 0.10, id: 'ph_y', side: 'yes' }, { label: 'No', price: 0.90, id: 'ph_n', side: 'no' }] },
+            ];
+
+            const kalshiMarkets = [
+                { id: 'k_powell', title: 'Jerome H. Powell', volume: 28000, outcomes: [{ label: 'Yes', price: 0.27, id: 'kp_y', side: 'yes' }, { label: 'No', price: 0.73, id: 'kp_n', side: 'no' }] },
+                { id: 'k_warsh', title: 'Kevin W. Warsh', volume: 45000, outcomes: [{ label: 'Yes', price: 0.39, id: 'kw_y', side: 'yes' }, { label: 'No', price: 0.61, id: 'kw_n', side: 'no' }] },
+                { id: 'k_hassett', title: 'Kevin Hassett', volume: 12000, outcomes: [{ label: 'Yes', price: 0.12, id: 'kh_y', side: 'yes' }, { label: 'No', price: 0.88, id: 'kh_n', side: 'no' }] },
+            ];
+
+            const polyParsed = bot.parseOutcomes(polyMarkets, 'polymarket');
+            const kalshiParsed = bot.parseOutcomes(kalshiMarkets, 'kalshi');
+
+            const matches = matchOutcomes(polyParsed, kalshiParsed, 0.5);
+
+            // Should match all 3
+            expect(matches.length).toBe(3);
+
+            // Verify correct pairings
+            const warshMatch = matches.find(m => m.polymarket.marketId === 'p_warsh');
+            expect(warshMatch.kalshi.marketId).toBe('k_warsh');
+
+            const powellMatch = matches.find(m => m.polymarket.marketId === 'p_powell');
+            expect(powellMatch.kalshi.marketId).toBe('k_powell');
+
+            const hassettMatch = matches.find(m => m.polymarket.marketId === 'p_hassett');
+            expect(hassettMatch.kalshi.marketId).toBe('k_hassett');
+        });
+
+        test('should handle asymmetric candidate lists (more on one platform)', async () => {
+            const { matchOutcomes } = await import('../src/matcher.js');
+
+            const polyMarkets = [
+                { id: 'p_warsh', title: 'Kevin Warsh', volume: 50000, outcomes: [{ label: 'Yes', price: 0.41, id: 'pw_y', side: 'yes' }, { label: 'No', price: 0.59, id: 'pw_n', side: 'no' }] },
+                { id: 'p_powell', title: 'Jerome Powell', volume: 30000, outcomes: [{ label: 'Yes', price: 0.25, id: 'pp_y', side: 'yes' }, { label: 'No', price: 0.75, id: 'pp_n', side: 'no' }] },
+                { id: 'p_hassett', title: 'Kevin Hassett', volume: 10000, outcomes: [{ label: 'Yes', price: 0.10, id: 'ph_y', side: 'yes' }, { label: 'No', price: 0.90, id: 'ph_n', side: 'no' }] },
+                { id: 'p_yellen', title: 'Janet Yellen', volume: 5000, outcomes: [{ label: 'Yes', price: 0.05, id: 'py_y', side: 'yes' }, { label: 'No', price: 0.95, id: 'py_n', side: 'no' }] },
+                { id: 'p_brainard', title: 'Lael Brainard', volume: 3000, outcomes: [{ label: 'Yes', price: 0.02, id: 'pb_y', side: 'yes' }, { label: 'No', price: 0.98, id: 'pb_n', side: 'no' }] },
+            ];
+
+            const kalshiMarkets = [
+                { id: 'k_warsh', title: 'Kevin Warsh', volume: 45000, outcomes: [{ label: 'Yes', price: 0.39, id: 'kw_y', side: 'yes' }, { label: 'No', price: 0.61, id: 'kw_n', side: 'no' }] },
+                { id: 'k_hassett', title: 'Kevin Hassett', volume: 12000, outcomes: [{ label: 'Yes', price: 0.12, id: 'kh_y', side: 'yes' }, { label: 'No', price: 0.88, id: 'kh_n', side: 'no' }] },
+                { id: 'k_powell', title: 'Jerome Powell', volume: 28000, outcomes: [{ label: 'Yes', price: 0.27, id: 'kp_y', side: 'yes' }, { label: 'No', price: 0.73, id: 'kp_n', side: 'no' }] },
+            ];
+
+            const polyParsed = bot.parseOutcomes(polyMarkets, 'polymarket');
+            const kalshiParsed = bot.parseOutcomes(kalshiMarkets, 'kalshi');
+
+            const matches = matchOutcomes(polyParsed, kalshiParsed, 0.7);
+
+            // Only 3 should match (the overlapping candidates)
+            expect(matches.length).toBe(3);
+
+            // Yellen and Brainard should NOT appear in matches
+            const matchedPolyIds = matches.map(m => m.polymarket.marketId);
+            expect(matchedPolyIds).not.toContain('p_yellen');
+            expect(matchedPolyIds).not.toContain('p_brainard');
         });
     });
 });

@@ -54,6 +54,33 @@ describe('Similarity Matcher Logic', () => {
         expect(matches[0].kalshi.title).toBe('Doug Burgum'); // Should match k2, not k1
     });
 
+    test('regression: identical titles produce arbitrary pairings (the "Yes" bug)', () => {
+        // This documents the bug where parseOutcomes used outcome labels ("Yes") instead
+        // of market titles. When all titles are identical, the matcher pairs them in order
+        // which is meaningless — Poly's Warsh could match Kalshi's Powell.
+        const poly = [
+            { title: 'Yes', marketId: 'p_warsh' },
+            { title: 'Yes', marketId: 'p_powell' },
+            { title: 'Yes', marketId: 'p_hassett' }
+        ];
+        const kalshi = [
+            { title: 'Yes', marketId: 'k_powell' },
+            { title: 'Yes', marketId: 'k_warsh' },
+            { title: 'Yes', marketId: 'k_hassett' }
+        ];
+
+        const matches = matchOutcomes(poly, kalshi, 0.7);
+
+        // All match with perfect score since titles are identical
+        expect(matches.length).toBe(3);
+        matches.forEach(m => expect(m.similarity).toBe(1));
+
+        // But pairings are just in-order (greedy), NOT semantically correct
+        // p_warsh matches k_powell (wrong!), p_powell matches k_warsh (wrong!)
+        expect(matches[0].polymarket.marketId).toBe('p_warsh');
+        expect(matches[0].kalshi.marketId).toBe('k_powell'); // Wrong pairing!
+    });
+
     test('should handle greedy matching (one-to-one)', () => {
         const poly = [
             { title: 'Name A', marketId: 'p1' },

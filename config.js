@@ -32,4 +32,10 @@ export const config = {
 
   // Minimum price threshold - skip markets where YES or NO is <= this value (in cents)
   minPriceThreshold: 2,
+
+  // Slack webhook URL for trade/error alerts (optional)
+  slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,
+
+  // Directory for log files
+  logDir: 'logs',
 };
