@@ -32,4 +32,12 @@ export const config = {
 
   // Minimum price threshold - skip markets where YES or NO is <= this value (in cents)
   minPriceThreshold: 2,
+
+  // Optional pre-trade resolution check via Crosswire (advisory, off by default).
+  // Asks whether the two legs actually settle the same way before executing. With
+  // resolutionCheck: false the bot behaves exactly as before. Fail-open: never blocks
+  // on Crosswire being down or on an uncovered pair. No API key (free tier).
+  resolutionCheck: false,
+  resolutionCheckMode: 'warn', // 'warn' = log only; 'block' = skip the trade on a BLOCK verdict
+  crosswireBase: 'https://api.crosswire-api.com',
 };

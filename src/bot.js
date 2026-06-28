@@ -1,6 +1,7 @@
 import pmxt from 'pmxtjs';
 import { matchOutcomes } from './matcher.js';
 import { findArbitrageOpportunities, getBestOpportunity } from './arbitrage.js';
+import { checkResolution } from './resolutionCheck.js';
 
 export class ArbitrageBot {
     constructor(config) {
@@ -105,6 +106,32 @@ export class ArbitrageBot {
 
         const polyOutcomeId = opportunity.polymarketSide === 'YES' ? opportunity.polymarketOutcome.yesId : opportunity.polymarketOutcome.noId;
         const kalshiOutcomeId = opportunity.kalshiSide === 'YES' ? opportunity.kalshiOutcome.yesId : opportunity.kalshiOutcome.noId;
+
+        // Optional pre-trade resolution gate (off by default, fail-open, advisory only).
+        // Confirms the two legs actually settle the same way before placing orders. An
+        // uncovered pair or any error passes through; only a BLOCK verdict in 'block' mode skips.
+        if (this.config.resolutionCheck) {
+            const resolution = await checkResolution(
+                { marketId: opportunity.polymarketOutcome.marketId, outcome: opportunity.outcome, side: opportunity.polymarketSide.toLowerCase() },
+                { marketId: opportunity.kalshiOutcome.marketId, outcome: opportunity.outcome, side: opportunity.kalshiSide.toLowerCase() },
+                { base: this.config.crosswireBase }
+            );
+
+            if (!resolution.covered) {
+                console.log('   [RESOLUTION] not covered, proceeding');
+            } else if (resolution.verdict === 'block') {
+                const codes = resolution.findings.join(', ');
+                if (this.config.resolutionCheckMode === 'block') {
+                    console.log(`   [RESOLUTION] BLOCK: ${codes} - legs may not settle the same way, skipping`);
+                    return false;
+                }
+                console.log(`   [RESOLUTION] BLOCK: ${codes} - legs may not settle the same way (warn mode, proceeding)`);
+            } else if (resolution.verdict === 'caution') {
+                console.log(`   [RESOLUTION] CAUTION: ${resolution.findings.join(', ')} - residual settlement risk, proceeding`);
+            } else {
+                console.log('   [RESOLUTION] SAFE');
+            }
+        }
 
         const [polyTrade, kalshiTrade] = await Promise.all([
             this.executeTrade('polymarket', opportunity.polymarketOutcome.marketId, polyOutcomeId, 'buy', polyContracts),

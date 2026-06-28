@@ -98,6 +98,25 @@ Picks the strategy with maximum profit.
 | `matchingThreshold` | Fuzzy match threshold (0-1) | 0.7 |
 | `dryRun` | Test mode (no real trades) | true |
 
+## Optional: pre-trade resolution check (Crosswire)
+
+A synthetic arb is only risk-free if both legs settle the same way. They don't always: the Polymarket and Kalshi legs can use a different resolution source, settle at a different instant, or void under different rules, and resolve to opposite sides. This optional check asks [Crosswire](https://api.crosswire-api.com) whether the two legs are actually fungible before the bot places orders, and gets back `safe` / `caution` / `block` plus the divergence finding codes.
+
+It is **off by default**. Turn it on in `config.js`:
+
+```javascript
+resolutionCheck: true,          // default: false
+resolutionCheckMode: 'warn',    // 'warn' = log only; 'block' = skip the trade on a BLOCK verdict
+crosswireBase: 'https://api.crosswire-api.com',
+```
+
+- `warn` (default) logs the verdict and proceeds.
+- `block` skips an opportunity that comes back `block`, with a log line naming the finding codes.
+
+It is **fail-open**: any timeout, network error, or non-200 lets the trade proceed, so the bot is never blocked by Crosswire being down. It uses the runtime's built-in `fetch` (no new dependency) on a short timeout, and needs **no API key** (free tier).
+
+**Coverage is narrow today.** It covers cross-venue BTC matched-strike pairs and a World Cup set; everything else (Fed-chair and most political markets) returns "not covered" and passes straight through. It is **advisory only**: Crosswire never executes, prices, or predicts, and the bot sends it nothing but the two market references. Live covered pairs are listed at [`/v1/events`](https://api.crosswire-api.com/v1/events); project at [crosswire-api.com](https://crosswire-api.com).
+
 ## Example Output
 
 ```
